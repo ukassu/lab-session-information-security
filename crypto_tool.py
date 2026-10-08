@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import argparse
 import base64
-import getpass
 import hashlib
 import hmac
 import json
@@ -23,32 +22,33 @@ from Crypto.Protocol.KDF import PBKDF2
 
 VERSION = 1
 SALT_SIZE = 16
-AES_NONCE_SIZE = 12
+AES_IV_SIZE = 16
 DES_IV_SIZE = 8
 PBKDF2_ROUNDS = 600_000
 ALGORITHMS = {"AES", "DES", "RC4"}
+CIPHERTEXT_DIR = Path(__file__).resolve().parent / "ciphertexts"
 
 
-def _b64(value: bytes) -> str:
+def b64(value: bytes) -> str:
     return base64.b64encode(value).decode("ascii")
 
 
-def _unb64(value: str) -> bytes:
+def unb64(value: str) -> bytes:
     return base64.b64decode(value.encode("ascii"), validate=True)
 
 
-def _derive(password: str, salt: bytes, length: int) -> bytes:
+def derive(password: str, salt: bytes, length: int) -> bytes:
     if not password:
         raise ValueError("Password must not be empty.")
     return PBKDF2(password, salt, dkLen=length, count=PBKDF2_ROUNDS, hmac_hash_module=SHA256)
 
 
-def _pkcs7_pad(data: bytes, block_size: int) -> bytes:
+def pkcs7pad(data: bytes, block_size: int) -> bytes:
     padding = block_size - len(data) % block_size
     return data + bytes([padding]) * padding
 
 
-def _pkcs7_unpad(data: bytes, block_size: int) -> bytes:
+def pkcs7unpad(data: bytes, block_size: int) -> bytes:
     if not data or len(data) % block_size:
         raise ValueError("Invalid padding.")
     padding = data[-1]
@@ -57,123 +57,138 @@ def _pkcs7_unpad(data: bytes, block_size: int) -> bytes:
     return data[:-padding]
 
 
-def encrypt_bytes(data: bytes, password: str, algorithm: str = "AES", name: str = "data") -> bytes:
-    """Encrypt bytes and return a UTF-8 JSON envelope."""
+def encryptbytes(data: bytes, password: str, algorithm: str = "AES", name: str = "data") -> bytes:
     algorithm = algorithm.upper()
     if algorithm not in ALGORITHMS:
-        raise ValueError(f"Algorithm must be one of: {', '.join(sorted(ALGORITHMS))}.")
+        raise ValueError(f"Algorithm must be one of AES, DSA, RC4")
     salt = secrets.token_bytes(SALT_SIZE)
     fields: dict[str, Any] = {
-        "version": VERSION,
         "algorithm": algorithm,
         "name": name,
-        "salt": _b64(salt),
-        "kdf": {"name": "PBKDF2-HMAC-SHA256", "iterations": PBKDF2_ROUNDS},
+        "salt": b64(salt),
     }
 
     if algorithm == "AES":
-        key = _derive(password, salt, 32)
-        nonce = secrets.token_bytes(AES_NONCE_SIZE)
-        cipher = AES.new(key, AES.MODE_GCM, nonce=nonce)
-        ciphertext, tag = cipher.encrypt_and_digest(data)
-        fields.update(nonce=_b64(nonce), ciphertext=_b64(ciphertext), tag=_b64(tag))
+        key = derive(password, salt, 32)
+        iv = secrets.token_bytes(AES_IV_SIZE)
+        ciphertext = AES.new(key, AES.MODE_CBC, iv=iv).encrypt(pkcs7pad(data, AES.block_size))
+        fields.update(iv=b64(iv), ciphertext=b64(ciphertext))
     elif algorithm == "DES":
-        key = _derive(password, salt, 8)
+        key = derive(password, salt, 8)
         iv = secrets.token_bytes(DES_IV_SIZE)
-        ciphertext = DES.new(key, DES.MODE_CBC, iv=iv).encrypt(_pkcs7_pad(data, DES.block_size))
-        mac = hmac.new(key, iv + ciphertext, hashlib.sha256).digest()
-        fields.update(iv=_b64(iv), ciphertext=_b64(ciphertext), mac=_b64(mac))
+        ciphertext = DES.new(key, DES.MODE_CBC, iv=iv).encrypt(pkcs7pad(data, DES.block_size))
+        fields.update(iv=b64(iv), ciphertext=b64(ciphertext))
     else:
-        key = _derive(password, salt, 32)
-        nonce = secrets.token_bytes(16)
-        stream_key = hmac.new(key, nonce, hashlib.sha256).digest()
-        ciphertext = ARC4.new(stream_key).encrypt(data)
-        mac = hmac.new(key, nonce + ciphertext, hashlib.sha256).digest()
-        fields.update(nonce=_b64(nonce), ciphertext=_b64(ciphertext), mac=_b64(mac))
+        key = derive(password, salt, 32)
+        ciphertext = ARC4.new(key).encrypt(data)
+        fields.update(ciphertext=b64(ciphertext))
 
-    return json.dumps(fields, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return json.dumps(fields, indent=4)
 
 
-def decrypt_bytes(envelope: bytes, password: str) -> tuple[bytes, str]:
-    """Decrypt an envelope and return (original bytes, original name)."""
+def decryptbytes(envelope: str | bytes, password: str) -> tuple[bytes, str]:
     try:
-        fields = json.loads(envelope.decode("utf-8"))
+        fields = json.loads(envelope)
         algorithm = fields["algorithm"].upper()
-        salt = _unb64(fields["salt"])
-        if fields["version"] != VERSION or algorithm not in ALGORITHMS:
-            raise ValueError("Unsupported envelope format or version.")
-    except (UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+        salt = unb64(fields["salt"])
+        ciphertext = unb64(fields["ciphertext"])
+        iv = unb64(fields["iv"]) if algorithm in {"AES", "DES"} else b""
+    except (UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError, AttributeError, ValueError) as exc:
         raise ValueError("The encrypted file is not a valid envelope.") from exc
-
+    if algorithm not in ALGORITHMS:
+        raise ValueError(f"Unsupported algorithm: {algorithm}")
     if len(salt) != SALT_SIZE:
         raise ValueError("Invalid salt.")
-    ciphertext = _unb64(fields["ciphertext"])
+
     try:
         if algorithm == "AES":
-            key = _derive(password, salt, 32)
-            nonce, tag = _unb64(fields["nonce"]), _unb64(fields["tag"])
-            data = AES.new(key, AES.MODE_GCM, nonce=nonce).decrypt_and_verify(ciphertext, tag)
+            key = derive(password, salt, 32)
+            data = pkcs7unpad(AES.new(key, AES.MODE_CBC, iv=iv).decrypt(ciphertext), AES.block_size)
         elif algorithm == "DES":
-            key = _derive(password, salt, 8)
-            iv, mac = _unb64(fields["iv"]), _unb64(fields["mac"])
-            if not hmac.compare_digest(mac, hmac.new(key, iv + ciphertext, hashlib.sha256).digest()):
-                raise ValueError("Wrong password or the data has been modified.")
-            data = _pkcs7_unpad(DES.new(key, DES.MODE_CBC, iv=iv).decrypt(ciphertext), DES.block_size)
+            key = derive(password, salt, 8)
+            data = pkcs7unpad(DES.new(key, DES.MODE_CBC, iv=iv).decrypt(ciphertext), DES.block_size)
         else:
-            key = _derive(password, salt, 32)
-            nonce, mac = _unb64(fields["nonce"]), _unb64(fields["mac"])
-            if not hmac.compare_digest(mac, hmac.new(key, nonce + ciphertext, hashlib.sha256).digest()):
-                raise ValueError("Wrong password or the data has been modified.")
-            stream_key = hmac.new(key, nonce, hashlib.sha256).digest()
-            data = ARC4.new(stream_key).decrypt(ciphertext)
-    except (KeyError, ValueError, TypeError, IndexError) as exc:
-        if isinstance(exc, ValueError) and str(exc) in {"Wrong password or the data has been modified.", "Invalid padding."}:
-            raise
-        raise ValueError("Wrong password, corrupted envelope, or invalid parameters.") from exc
+            key = derive(password, salt, 32)
+            data = ARC4.new(key).decrypt(ciphertext)
+    except ValueError as exc:
+        raise ValueError("Wrong password or corrupted envelope.") from exc
     return data, str(fields.get("name", "data"))
 
+# BAWAH CM HELPER. INTI CRYPTO NYA DI ATAS
 
-def _password(confirm: bool = False) -> str:
-    password = getpass.getpass("Password: ")
-    if confirm:
-        if password != getpass.getpass("Confirm password: "):
-            raise ValueError("Password confirmation does not match.")
+def readpassword(confirm: bool = False) -> str:
+    password = input("Password: ")
+    if confirm and password != input("Confirm password: "):
+        raise ValueError("Password confirmation does not match.")
     return password
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Encrypt or decrypt text and files with AES, DES, or RC4.")
-    subparsers = parser.add_subparsers(dest="command", required=True)
-    enc = subparsers.add_parser("encrypt", help="Encrypt input into a JSON envelope")
-    enc.add_argument("-a", "--algorithm", choices=sorted(ALGORITHMS), default="AES")
-    enc.add_argument("-i", "--input", type=Path, help="Input file; use --text when omitted")
-    enc.add_argument("-t", "--text", help="UTF-8 text to encrypt")
-    enc.add_argument("-o", "--output", type=Path, required=True, help="Output envelope file")
+def buildparser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="crypto_tool.py",
+        description="Encrypt or decrypt text and files with AES, DES, or RC4.",
+    )
+    subparsers = parser.add_subparsers(dest="command", metavar="<encrypt|decrypt>")
+
+    enc = subparsers.add_parser("encrypt", help=f"Encrypt input into a JSON envelope in {CIPHERTEXT_DIR.name}/")
+    source = enc.add_mutually_exclusive_group(required=True)
+    source.add_argument("-i", "--input", type=Path, help="File to encrypt")
+    source.add_argument("-t", "--text", help="UTF-8 text to encrypt")
+    enc.add_argument("-a", "--algorithm", type=str.upper, choices=sorted(ALGORITHMS), default="AES")
+    enc.add_argument("-o", "--output", help=f"Envelope filename inside {CIPHERTEXT_DIR.name}/ (default: <name>.<alg>.json)")
     enc.add_argument("--password", help="Password (prompting is safer than putting it in the shell)")
+
     dec = subparsers.add_parser("decrypt", help="Decrypt a JSON envelope")
-    dec.add_argument("-i", "--input", type=Path, required=True)
-    dec.add_argument("-o", "--output", type=Path, help="Output file; required for binary data")
+    dec.add_argument("-i", "--input", type=Path, required=True, help=f"Envelope file to decrypt; a bare filename is also looked up in {CIPHERTEXT_DIR.name}/")
+    dec.add_argument("-o", "--output", type=Path, help="Output file (default: print text, or restore the original filename for binary data)")
     dec.add_argument("--password", help="Password (prompting is safer than putting it in the shell)")
+    return parser
+
+
+def encryptcommand(args: argparse.Namespace) -> None:
+    if args.text is not None:
+        data, name = args.text.encode("utf-8"), "text.txt"
+    else:
+        data, name = args.input.read_bytes(), args.input.name
+    password = args.password or readpassword(confirm=True)
+
+    filename = args.output or f"{name}.{args.algorithm.lower()}.json"
+    if not filename.endswith(".json"):
+        filename += ".json"
+    CIPHERTEXT_DIR.mkdir(exist_ok=True)
+    output = CIPHERTEXT_DIR / Path(filename).name
+    output.write_text(encryptbytes(data, password, args.algorithm, name), encoding="utf-8")
+    print(f"Saved {output}")
+
+
+def decryptcommand(args: argparse.Namespace) -> None:
+    source = args.input
+    if not source.exists() and (CIPHERTEXT_DIR / source.name).exists():
+        source = CIPHERTEXT_DIR / source.name
+    password = args.password or readpassword()
+    data, name = decryptbytes(source.read_bytes(), password)
+    if args.output is None:
+        try:
+            print(data.decode("utf-8"))
+            return
+        except UnicodeDecodeError:
+            args.output = Path(name)
+    args.output.write_bytes(data)
+    print(f"Saved {args.output}")
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = buildparser()
     args = parser.parse_args(argv)
+    if args.command is None:
+        parser.print_help(sys.stderr)
+        return 2
 
     try:
-        password = args.password or _password(confirm=args.command == "encrypt")
         if args.command == "encrypt":
-            if (args.input is None) == (args.text is None):
-                parser.error("Use exactly one of --text or --input.")
-            data = args.text.encode("utf-8") if args.text is not None else args.input.read_bytes()
-            name = "text.txt" if args.text is not None else args.input.name
-            args.output.write_bytes(encrypt_bytes(data, password, args.algorithm, name))
+            encryptcommand(args)
         else:
-            data, name = decrypt_bytes(args.input.read_bytes(), password)
-            if args.output:
-                args.output.write_bytes(data)
-            else:
-                try:
-                    sys.stdout.write(data.decode("utf-8"))
-                    sys.stdout.write("\n")
-                except UnicodeDecodeError as exc:
-                    raise ValueError("The result is binary data; use the --output option.") from exc
+            decryptcommand(args)
         return 0
     except (OSError, ValueError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
