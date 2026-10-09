@@ -9,28 +9,6 @@ algorithm, the original filename, the salt, the IV, and the ciphertext.
 > (MAC), so tampering is not detected and a wrong password is not always
 > reported. DES and RC4 are insecure/deprecated. Do not use it for real data.
 
-## Menjalankan di workspace ini
-
-Workspace ini sudah menyediakan virtual environment `.venv` dan dependency
-`pycryptodome`. Dari folder project, aktifkan environment tersebut:
-
-```powershell
-cd D:\coding\ki\lab-session-information-security
-.\.venv\Scripts\Activate.ps1
-```
-
-Jika PowerShell tidak mengizinkan aktivasi, gunakan executable Python secara
-langsung:
-
-```powershell
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-```
-
-Jika `.venv` belum tersedia, Python 3.10+ direkomendasikan:
-
-```powershell
-py -m pip install -r requirements.txt
-```
 
 ## CLI usage
 
