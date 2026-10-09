@@ -1,9 +1,3 @@
-"""Password-based AES, DES, and RC4 encryption for text and arbitrary files.
-
-The encrypted representation is a self-contained JSON envelope, so the same
-functions can process UTF-8 text, DOCX/PDF files, images, and other bytes.
-"""
-
 from __future__ import annotations
 
 import argparse
