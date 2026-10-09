@@ -9,9 +9,24 @@ algorithm, the original filename, the salt, the IV, and the ciphertext.
 > (MAC), so tampering is not detected and a wrong password is not always
 > reported. DES and RC4 are insecure/deprecated. Do not use it for real data.
 
-## Installation
+## Menjalankan di workspace ini
 
-Python 3.10+ is recommended.
+Workspace ini sudah menyediakan virtual environment `.venv` dan dependency
+`pycryptodome`. Dari folder project, aktifkan environment tersebut:
+
+```powershell
+cd D:\coding\ki\lab-session-information-security
+.\.venv\Scripts\Activate.ps1
+```
+
+Jika PowerShell tidak mengizinkan aktivasi, gunakan executable Python secara
+langsung:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+Jika `.venv` belum tersedia, Python 3.10+ direkomendasikan:
 
 ```powershell
 py -m pip install -r requirements.txt
@@ -22,12 +37,13 @@ py -m pip install -r requirements.txt
 The script must be run with a command:
 
 ```powershell
-py crypto_tool.py <encrypt|decrypt> [options]
+python .\crypto_tool.py <encrypt|decrypt> [options]
 ```
 
-Running `py crypto_tool.py` without a command prints the help. Use
-`py crypto_tool.py encrypt -h` or `py crypto_tool.py decrypt -h` for the options
-of each command.
+Perintah dapat dijalankan dari PowerShell setelah `.venv` diaktifkan. Menjalankan
+`python .\crypto_tool.py` tanpa command akan menampilkan bantuan. Gunakan
+`python .\crypto_tool.py encrypt -h` atau
+`python .\crypto_tool.py decrypt -h` untuk melihat opsi masing-masing command.
 
 The password is typed at the prompt (it is visible while typing) or supplied
 with `--password`. When encrypting, the password is asked twice to confirm it.
@@ -42,14 +58,31 @@ with `--password`. When encrypting, the password is asked twice to confirm it.
 | `-o`, `--output NAME` | Envelope filename inside `ciphertexts/` (default: `<name>.<alg>.json`) |
 | `--password` | Password instead of the prompt |
 
-Envelopes are always saved to `ciphertexts/` next to the script; the folder is
-created if missing and an existing file with the same name is overwritten.
+Envelopes selalu disimpan ke `ciphertexts/` di sebelah file script. Folder
+tersebut dibuat otomatis jika belum ada. File dengan nama yang sama akan
+ditimpa.
 
 ```powershell
-py crypto_tool.py encrypt -t "Hello world"                    # ciphertexts/text.txt.aes.json
-py crypto_tool.py encrypt -a DES -i report.docx               # ciphertexts/report.docx.des.json
-py crypto_tool.py encrypt -a RC4 -i photo.png -o holiday      # ciphertexts/holiday.json
+python .\crypto_tool.py encrypt -t "Hello world" -a AES -o hello-aes
+# ciphertexts\hello-aes.json
+
+python .\crypto_tool.py encrypt `
+  -i ".\assets\Group 1_Report.pdf" -a DES -o report-des
+# ciphertexts\report-des.json
+
+python .\crypto_tool.py encrypt `
+  -i ".\assets\313081528_1148997432708747_5910995952251052677_n.jpg" `
+  -a RC4 -o image-rc4
+# ciphertexts\image-rc4.json
+
+python .\crypto_tool.py encrypt `
+  -i ".\assets\hallo.txt" -a AES -o hallo-aes
+# ciphertexts\hallo-aes.json
 ```
+
+Gunakan `AES`, `DES`, atau `RC4` pada opsi `-a`. AES direkomendasikan untuk
+demonstrasi utama; DES dan RC4 hanya digunakan untuk perbandingan algoritma
+legacy.
 
 ### Decrypt
 
@@ -59,13 +92,42 @@ py crypto_tool.py encrypt -a RC4 -i photo.png -o holiday      # ciphertexts/holi
 | `-o`, `--output FILE` | Where to write the result |
 | `--password` | Password instead of the prompt |
 
-Without `-o`, text is printed to the terminal; binary data (DOCX, PDF, images,
-...) is written to the current folder under its original filename.
+Untuk menyimpan semua hasil decrypt di workspace ini, buat folder `results`
+terlebih dahulu:
 
 ```powershell
-py crypto_tool.py decrypt -i text.txt.aes.json                # prints "Hello world"
-py crypto_tool.py decrypt -i report.docx.des.json             # writes report.docx
-py crypto_tool.py decrypt -i holiday.json -o restored.png
+New-Item -ItemType Directory -Force .\results
+```
+
+Opsi `-o` menentukan lokasi file hasil decrypt. Tanpa `-o`, teks dicetak ke
+terminal, sedangkan file biner ditulis ke folder saat ini menggunakan nama
+aslinya.
+
+```powershell
+python .\crypto_tool.py decrypt `
+  -i .\ciphertexts\hello-aes.json -o .\results\hello-aes.txt
+
+python .\crypto_tool.py decrypt `
+  -i .\ciphertexts\report-des.json `
+  -o ".\results\Group 1_Report.pdf"
+
+python .\crypto_tool.py decrypt `
+  -i .\ciphertexts\image-rc4.json -o .\results\image-rc4.jpg
+
+python .\crypto_tool.py decrypt `
+  -i .\ciphertexts\hallo-aes.json -o .\results\hallo-aes.txt
+```
+
+Saat decrypt, algoritma tidak perlu ditulis lagi dengan `-a`; program membaca
+algoritma dari envelope JSON. Password harus sama dengan password saat encrypt.
+Nama file ciphertext juga dapat diberikan tanpa path karena program otomatis
+mencarinya di folder `ciphertexts/`.
+
+Untuk memeriksa file yang dihasilkan:
+
+```powershell
+Get-ChildItem .\ciphertexts
+Get-ChildItem .\results
 ```
 
 ## Envelope format
@@ -112,12 +174,3 @@ Path(original_name).write_bytes(plain)
 `encryptbytes(data, password, algorithm, name)` returns the JSON envelope as a
 string. `decryptbytes(envelope, password)` accepts a string or bytes and returns
 `(data, original_name)`.
-
-## Testing
-
-```powershell
-py -m unittest -v
-```
-
-The tests cover binary-data round trips for all three algorithms and an
-incorrect password.
